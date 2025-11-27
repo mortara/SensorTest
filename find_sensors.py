@@ -3,10 +3,11 @@ from textual.widgets import Header, Footer, DataTable, Static, Button, Select
 from textual.containers import Horizontal
 from textual.reactive import reactive
 import RPi.GPIO as GPIO
-import Adafruit_DHT
 import asyncio
 import re
 import subprocess
+from pathlib import Path
+import importlib.util
 
 # SMBus for I2C
 try:
@@ -91,6 +92,15 @@ class GPIOApp(App):
         }
         # Reverse mapping BCM -> PHYS
         self.BCM_TO_PHYS = {bcm: phys for phys, bcm in self.PHYS_TO_BCM.items()}
+        # Plugin system for GPIO sensors
+        self.gpio_plugins = {}
+        self._load_gpio_plugins()
+        # Simple context to pass to plugins
+        class _PluginCtx:
+            def __init__(self, gpio, sem):
+                self.GPIO = gpio
+                self.gpio_sem = sem
+        self.plugin_ctx = _PluginCtx(GPIO, self.gpio_sem)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -102,13 +112,11 @@ class GPIOApp(App):
         self.btn_refresh = Button("Refresh Summary & Table", id="btn_refresh")
 
 
-        # Sensor-Auswahl (Combobox)
+        # Sensor selection (combobox) — options from plugins + I2C
+        plugin_options = [(name, name) for name in sorted(self.gpio_plugins.keys())]
+        plugin_options.append(("I2C Device", "I2C"))
         self.sensor_select = Select(
-            options=[
-                ("DHT22", "DHT22"),
-                ("LM393", "LM393"),
-                ("I2C Device", "I2C"),
-            ],
+            options=plugin_options,
             allow_blank=True,
             prompt="Assign sensor to selected pin",
             id="sensor_select"
@@ -448,78 +456,58 @@ class GPIOApp(App):
         except Exception:
             return
         try:
-            pin = int(row[0])
-        except:
+            phys_pin = int(row[0])
+        except Exception:
             self.detail_widget.update("Invalid row")
             return
 
-        sensor_raw = row[4] if len(row) > 4 else ""
-        info = row[5] if len(row) > 5 else ""
+        # Columns: 0 Pin (phys), 1 BCM (string), 2 Board func, 3 Mode, 4 Level, 5 Sensor, 6 Info
+        bcm_str = row[1] if len(row) > 1 else ""
+        try:
+            bcm_pin = int(bcm_str) if str(bcm_str).isdigit() else None
+        except Exception:
+            bcm_pin = None
+        sensor_raw = row[5] if len(row) > 5 else ""
+        info = row[6] if len(row) > 6 else ""
         sensor = re.sub(r'\[/?\w+\]', '', sensor_raw).strip()
 
         if sensor == "" or sensor == "-":
-            # No sensor: do not auto search (performance)
-            self.detail_widget.update(f"Pin {pin}: No sensor detected")
+            self.detail_widget.update(f"Pin {phys_pin}: No sensor detected")
             return
 
-        info_clean = re.sub(r'\[/?\w+\]', '', info)
-        details = f"Pin {pin}\nSensor: {sensor}\nInfo: {info_clean}\n"
-
-        if sensor.upper().startswith("DHT22"):
-            self.detail_widget.update(details + "Reading DHT22 ...")
+        # Delegate full rendering to plugin if available
+        plugin = self.gpio_plugins.get(sensor)
+        if plugin is not None and hasattr(plugin, "details"):
             try:
-                def read_dht():
-                    return Adafruit_DHT.read_retry(Adafruit_DHT.DHT22, pin, retries=3, delay_seconds=0.3)
-                async with self.gpio_sem:
-                    humidity, temp = await asyncio.to_thread(read_dht)
-                if humidity is not None and temp is not None:
-                    details += f"Current: {temp:.1f}°C / {humidity:.1f}%"
-                else:
-                    details += "No valid readings"
-            except Exception as e:
-                details += f"Read error: {e}"
-        else:
-            level = row[3] if len(row) > 3 else ""
-            level_clean = re.sub(r'\[/?\w+\]', '', level)
-            details += f"Current level: {level_clean}"
+                details_txt = await plugin.details(phys_pin, bcm_pin, self.plugin_ctx)
+                self.detail_widget.update(details_txt)
+                return
+            except Exception:
+                pass
 
+        # Fallback generic details
+        info_clean = re.sub(r'\[/?\w+\]', '', info)
+        level = row[4] if len(row) > 4 else ""
+        level_clean = re.sub(r'\[/?\w+\]', '', level)
+        details = f"Pin {phys_pin}\nSensor: {sensor}\nInfo: {info_clean}\nCurrent level: {level_clean}"
         self.detail_widget.update(details)
 
     async def scan_pin(self, pin:int):
         self.detail_widget.update(f"Searching sensors on pin {pin}...")
 
-        # bekannten Sensoren am einzelnen Pin prüfen und Tabelle/Details aktualisieren
-        # 1) DHT22
-        try:
-            self.detail_widget.update(f"Pin {pin}: Check DHT22...")
-            def read_dht():
-                return Adafruit_DHT.read_retry(Adafruit_DHT.DHT22, pin, retries=5, delay_seconds=0.3)
-            async with self.gpio_sem:
-                humidity, temp = await asyncio.to_thread(read_dht)
-            if humidity is not None and temp is not None and 0 <= humidity <= 100 and -40 <= temp <= 80:
-                disp = self.get_display_pin(pin)
-                self.table.update_sensor(disp, "DHT22", f"{temp:.1f}°C / {humidity:.1f}%", color="green")
-                self.detail_widget.update(f"Pin {pin}: DHT22 detected – {temp:.1f}°C / {humidity:.1f}%")
-                return
-        except Exception:
-            pass
-
-        # 2) LM393 (digitaler Helligkeitssensor, einfacher Pegeltest)
-        try:
-            self.detail_widget.update(f"Pin {pin}: Check LM393...")
-            async with self.gpio_sem:
-                GPIO.setup(pin, GPIO.IN)
-                v1 = GPIO.input(pin)
-                await asyncio.sleep(0.02)
-                v2 = GPIO.input(pin)
-            if v1 == v2:
-                state = "BRIGHT" if v1 else "DARK"
-                disp = self.get_display_pin(pin)
-                self.table.update_sensor(disp, "LM393", state, color="cyan")
-                self.detail_widget.update(f"Pin {pin}: LM393 detected – state: {state}")
-                return
-        except Exception:
-            pass
+        # Check known sensors via plugins
+        for name, plugin in self.gpio_plugins.items():
+            try:
+                self.detail_widget.update(f"Pin {pin}: Check {name}...")
+                res = await plugin.detect(pin, self.plugin_ctx)
+                if res:
+                    sensor_type, info, color = res
+                    disp = self.get_display_pin(pin)
+                    self.table.update_sensor(disp, sensor_type, info, color=color)
+                    self.detail_widget.update(f"Pin {pin}: {sensor_type} detected – {info}")
+                    return
+            except Exception:
+                continue
 
         # Falls nichts erkannt wurde
         self.detail_widget.update(f"Pin {pin}: No known sensor found")
@@ -537,21 +525,13 @@ class GPIOApp(App):
                 # 1) Manuell zugewiesene Pins bevorzugt lesen
                 for pin, sensor in list(self.fixed_pin_sensors.items()):
                     try:
-                        if sensor == "DHT22":
-                            async with self.gpio_sem:
-                                def read_dht():
-                                    return Adafruit_DHT.read_retry(Adafruit_DHT.DHT22, pin, retries=2, delay_seconds=0.5)
-                                humidity, temp = await asyncio.to_thread(read_dht)
-                            if humidity is not None and temp is not None and 0 <= humidity <= 100 and -40 <= temp <= 80:
+                        plugin = self.gpio_plugins.get(sensor)
+                        if plugin is not None:
+                            res = await plugin.read(pin, self.plugin_ctx)
+                            if res:
+                                sensor_type, info, color = res
                                 disp = self.get_display_pin(pin)
-                                self.table.update_sensor(disp, "DHT22", f"{temp:.1f}°C / {humidity:.1f}%", color="green")
-                        elif sensor == "LM393":
-                            async with self.gpio_sem:
-                                GPIO.setup(pin, GPIO.IN)
-                                v = GPIO.input(pin)
-                            state = "BRIGHT" if v else "DARK"
-                            disp = self.get_display_pin(pin)
-                            self.table.update_sensor(disp, "LM393", state, color="cyan")
+                                self.table.update_sensor(disp, sensor_type, info, color=color)
                         elif sensor == "I2C":
                             # No per-pin reading; keep info
                             self.table.update_sensor(pin, "I2C", "active", color="yellow")
@@ -581,48 +561,16 @@ class GPIOApp(App):
         self.last_row_key = event.row_key
         await self._show_row_details(event.row_key)
 
-    # If a CellSelected event comes from a click
     async def on_data_table_cell_selected(self, event: DataTable.CellSelected):
         # Many versions also provide row_key in the event
         row_key = getattr(event, "row_key", None)
         if row_key is None:
-            # Alternatively try from coordinate
             coord = getattr(event, "coordinate", None)
             if coord is not None:
                 row_key = coord.row_key if hasattr(coord, "row_key") else coord.row
         if row_key is not None:
             self.last_row_key = row_key
             await self._show_row_details(row_key)
-
-    # Selection handler for the sensor combobox
-    async def on_select_changed(self, event: Select.Changed):
-        if event.select.id != "sensor_select":
-            return
-        value = event.value
-        if value is None:
-            return
-        # Assign to the currently selected row
-        row_key = self.last_row_key
-        if row_key is None:
-            self.status_text = "No pin selected – please select a row"
-            return
-        try:
-            row = self.table.get_row(row_key)
-            selected_pin = int(row[0])
-        except Exception:
-            self.status_text = "Invalid row"
-            return
-        # Assign permanently and update table
-        target_bcm = self.PHYS_TO_BCM.get(selected_pin)
-        if target_bcm is None:
-            self.status_text = "Pin without BCM mapping"
-            return
-        self.fixed_pin_sensors[target_bcm] = value
-        info = "manually assigned"
-        color = "magenta"
-        # Visible pin is the selected one (BCM or BOARD)
-        self.table.update_sensor(selected_pin, value, info, color=color)
-        self.status_text = f"Pin {selected_pin} (BOARD) assigned: {value}"
 
     # ----------------- GPIO Scan -----------------
     async def scan_gpio(self):
@@ -646,17 +594,17 @@ class GPIOApp(App):
                     continue
                 self.status_text=f"Checking pin {pin}..."
                 await asyncio.sleep(0.05)
-                # DHT22
-                try:
-                    async with self.gpio_sem:
-                        def read_dht():
-                            return Adafruit_DHT.read_retry(Adafruit_DHT.DHT22,pin,retries=2,delay_seconds=0.5)
-                        humidity,temp = await asyncio.to_thread(read_dht)
-                    if humidity is not None and temp is not None and 0 <= humidity <= 100 and -40 <= temp <= 80:
-                        disp = self.get_display_pin(pin)
-                        self.table.update_sensor(disp,"DHT22",f"{temp:.1f}°C / {humidity:.1f}%",color="green")
-                except: pass
-                # LM393 auto-detection disabled (unreliable); keep manual assignments only
+                # Try all GPIO sensor plugins for auto-detection
+                for name, plugin in self.gpio_plugins.items():
+                    try:
+                        res = await plugin.detect(pin, self.plugin_ctx)
+                        if res:
+                            sensor_type, info, color = res
+                            disp = self.get_display_pin(pin)
+                            self.table.update_sensor(disp, sensor_type, info, color=color)
+                            break
+                    except Exception:
+                        continue
         except asyncio.CancelledError:
             return
         
@@ -692,6 +640,38 @@ class GPIOApp(App):
         
         self.status_text="I2C scan completed"
         self.btn_i2c.label="Start I2C Scan"
+
+    # ----------------- Plugin loading -----------------
+    def _load_gpio_plugins(self):
+        try:
+            plugins_dir = Path(__file__).parent / "plugins"
+            if not plugins_dir.exists():
+                return
+            for file in plugins_dir.iterdir():
+                if not file.is_file() or not file.name.endswith(".py"):
+                    continue
+                if file.name in ("__init__.py", "base.py"):
+                    continue
+                spec = importlib.util.spec_from_file_location(f"plugins.{file.stem}", str(file))
+                if not spec or not spec.loader:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                try:
+                    spec.loader.exec_module(module)
+                except Exception:
+                    continue
+                # Each plugin module should expose get_plugin() -> instance with .name, async detect/read
+                get_plugin = getattr(module, "get_plugin", None)
+                if callable(get_plugin):
+                    try:
+                        instance = get_plugin()
+                        name = getattr(instance, "name", None)
+                        if name:
+                            self.gpio_plugins[name] = instance
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
 # -------------------------------------------------------------------
 if __name__=="__main__":
