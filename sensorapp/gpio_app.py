@@ -263,7 +263,7 @@ class GPIOApp(App):
         pins.sort(key=lambda x: x.get("phys", 0)); return pins
 
     async def update_pin_summary(self):
-        # Try pintest -> pinout (-r) -> pinout -> gpio readall; show truncated output
+        # Try pinout -r -> pinout -> gpio readall; show truncated output
         def try_cmd(cmd:list[str]):
             try:
                 print(f"[pin-summary] Running: {' '.join(cmd)} (timeout 3s)")
@@ -271,17 +271,28 @@ class GPIOApp(App):
                 if out.returncode != 0:
                     raise RuntimeError(out.stderr.strip() or f"exit {out.returncode}")
                 text = (out.stdout or "").strip()
-                print(f"[pin-summary] Success: {' '.join(cmd)}; first lines:\n" + "\n".join(out.splitlines()[:6]))
+                print(f"[pin-summary] Success: {' '.join(cmd)}; first lines:\n" + "\n".join(text.splitlines()[:6]))
                 return text
             except Exception as e:
                 print(f"[pin-summary] Failed: {' '.join(cmd)} -> {e}")
                 return None
 
         print("[pin-summary] Start collecting pin summary...")
-        output = await asyncio.to_thread(try_cmd, ["pinout"])
-        title = "pinout"
-
+        title = None
+        # Prefer compact pinout -r if available
+        output = await asyncio.to_thread(try_cmd, ["pinout", "-r"])
         if output:
+            title = "pinout -r"
+        else:
+            output = await asyncio.to_thread(try_cmd, ["pinout"])
+            if output:
+                title = "pinout"
+            else:
+                output = await asyncio.to_thread(try_cmd, ["gpio", "readall"])  # wiringpi
+                if output:
+                    title = "gpio readall"
+
+        if output and title:
             lines = [ln for ln in output.splitlines() if ln.strip()]
             summary = "\n".join(lines[:18]) if lines else "No output"
             try:
@@ -463,7 +474,24 @@ class GPIOApp(App):
 
 def run_app():
     try:
-        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+        # Configure dedicated file + console logging
+        log_dir = Path(__file__).parent.parent / "logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+        # Replace handlers to avoid duplicates
+        logger.handlers = []
+        fh = logging.FileHandler(log_dir / "sensorapp.log", mode="a", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s"))
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.INFO)
+        sh.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(fh); logger.addHandler(sh)
+        logging.info("Logger initialized; writing to %s", str(log_dir / "sensorapp.log"))
     except Exception:
         pass
     if os.environ.get("SENSOR_PLUGINS_DIR"):
