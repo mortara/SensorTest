@@ -467,7 +467,11 @@ def run_app():
     except Exception:
         pass
     if os.environ.get("SENSOR_PLUGINS_DIR"):
-        print(f"[startup] SENSOR_PLUGINS_DIR={os.environ.get('SENSOR_PLUGINS_DIR')}")
+        print(f"[startup] SENSOR_PLUGINS_DIR={os.environ.get('SENSOR_PLUGINS_DIR')}", flush=True)
     app = GPIOApp()
-    print(f"[startup] Total plugins loaded: {len(app.gpio_plugins)}")
-    app.run()
+    print(f"[startup] Total plugins loaded: {len(app.gpio_plugins)}", flush=True)
+    # Write Textual logs to a file for diagnostics if supported
+    try:
+        app.run(log="textual.log")
+    except TypeError:
+        app.run()
