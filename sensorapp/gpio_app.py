@@ -106,6 +106,11 @@ class GPIOApp(App):
         self.status_widget = Static("", id="status")
         self.detail_widget = Static("", id="details")
         right_side = Vertical(self.status_widget, self.detail_widget, id="right")
+        # Show a placeholder so the UI isn't blank before async summary loads
+        try:
+            self.summary_widget.update("[yellow]Loading pin summary...[/yellow]")
+        except Exception:
+            pass
         yield Horizontal(self.summary_widget, right_side, id="topinfo")
         self.build_table_rows()
         yield self.table
