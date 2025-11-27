@@ -1,6 +1,6 @@
 # SensorTest
 
-Textual-based TUI for scanning and displaying sensors on Raspberry Pi GPIO and I2C pins. It detects DHT22, lists I2C device addresses, and shows an interactive table with pin information (mode, level, sensor, info) alongside buttons to start/stop scans. You can also manually assign sensors to pins.
+Textual-based TUI for scanning and displaying sensors on Raspberry Pi GPIO and I2C pins. It auto-detects supported GPIO sensors (e.g. DHT22, DS18B20, BMP280, PIR HC-SR501, Button, LM393) and lists I2C device addresses. The UI shows an interactive table with pin information (mode, level, sensor, info) plus concise controls for starting/stopping scans and assigning sensors manually.
 
 ## Requirements
 - Raspberry Pi OS (Bullseye/Bookworm) with Python 3
@@ -33,12 +33,12 @@ If you see permission errors (GPIO/I2C):
 sudo -E python3 find_sensors.py
 ```
 
-Controls (short):
-- Start GPIO Scan: scans BCM 2–27 (excluding bus pins) for DHT22.
-- Start I2C Scan: scans I2C bus 1 for addresses `0x03`–`0x77`.
-- Stop All Scans: cancels running scans.
-- Refresh Summary & Table: updates `pinout` summary and the table.
-- Select (combobox): manually assigns `DHT22`, `LM393`, or `I2C` to the selected pin.
+Controls:
+- Scan GPIO: safe auto-detect scan over BCM 2–27 (excluding bus pins) for all auto-detectable plugins.
+- Scan I2C: scans I2C bus 1 for addresses `0x03`–`0x77` and marks found devices.
+- Scan Pin: performs a safe single-pin scan (excludes bus pins) using auto-detectable plugins.
+- Stop All: cancels any running GPIO or I2C scans.
+- Assign sensor (select): manually tag a pin with a sensor name (`I2C`, or any loaded plugin) so periodic reads keep it updated.
 
 ## Screenshots
 Place your screenshots in `docs/` and keep the names below (or adjust the links):
@@ -47,7 +47,7 @@ Place your screenshots in `docs/` and keep the names below (or adjust the links)
 ![I2C scan](docs/screenshot-i2c.png)
 ![DHT22 details](docs/screenshot-dht22.png)
 
-### How to capture (on Raspberry Pi)
+### How to Capture (on Raspberry Pi)
 - With GUI: install `scrot` and take a snapshot
 	```bash
 	sudo apt update
@@ -63,6 +63,36 @@ Place your screenshots in `docs/` and keep the names below (or adjust the links)
 - No GPIO permissions: `sudo usermod -aG gpio $USER` and reboot
 
 License: see `LICENSE`.
+
+## Code Layout
+
+```
+find_sensors.py        # Minimal entrypoint calling sensorapp.gpio_app.run_app()
+sensorapp/
+	gpio_app.py          # Main Textual application (GPIOApp) + run_app()
+	pin_table.py         # PinTable widget abstraction (columns + update helper)
+	plugins_loader.py    # Dynamic discovery + fallback loader + options builder
+plugins/               # Individual sensor plugins (get_plugin factory per file)
+```
+
+### Module Responsibilities
+- `find_sensors.py`: Keeps startup logic tiny; no business code.
+- `sensorapp/gpio_app.py`: Event handlers, scanning workflows (GPIO/I2C), periodic polling, detail rendering.
+- `sensorapp/pin_table.py`: Encapsulates table schema and update logic.
+- `sensorapp/plugins_loader.py`: Robust plugin import with fallback compilation (future annotations) and option list construction.
+- `plugins/*.py`: Each implements `get_plugin()` returning an instance with `name`, `auto_detectable`, and async `detect/read/details` methods.
+
+### Extending
+- New sensor: add `plugins/<sensor>.py` with `get_plugin()`; no changes to core needed.
+- Additional UI panes: create new widget/module under `sensorapp/` and import in `gpio_app.py`.
+- Tests: add `tests/` (e.g. async detection mocks) isolating plugin logic.
+- Configuration: use environment variables (e.g. `SENSOR_PLUGINS_DIR`) or introduce a `config.py` in `sensorapp/` for structured settings.
+
+### Design Notes
+- Hardware access serialized via a single `asyncio.Semaphore` (`gpio_sem`) to avoid race conditions on GPIO.
+- Scans use timeouts (`SCAN_PLUGIN_TIMEOUT`) preventing hangs on misbehaving plugins.
+- Periodic polling task is cancelled during active GPIO scan to avoid contention.
+- I2C detection intentionally minimal (`write_quick`) to stay generic across devices.
 
 ## Plugin System (GPIO Sensors)
 GPIO sensors are loaded dynamically from the `plugins/` folder. Each plugin is a Python file exposing:
