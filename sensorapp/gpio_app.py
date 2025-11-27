@@ -124,6 +124,11 @@ class GPIOApp(App):
                 self.sensor_select.set_options(build_plugin_options(self.gpio_plugins))
         except Exception:
             pass
+        # Populate pin summary at startup
+        try:
+            asyncio.create_task(self.update_pin_summary())
+        except Exception:
+            pass
         if self.sensor_poll_task is None or self.sensor_poll_task.done():
             self.sensor_poll_task = asyncio.create_task(self.poll_sensors_periodically())
 
@@ -249,6 +254,38 @@ class GPIOApp(App):
                     phys = int(m.group(2)); name_raw = m.group(1).upper(); name = "3V3" if name_raw in ("3.3V", "3V3") else ("GND" if name_raw in ("GND", "GROUND") else name_raw)
                     if all(p.get("phys") != phys for p in pins): pins.append({"phys": phys, "bcm": None, "name": name})
         pins.sort(key=lambda x: x.get("phys", 0)); return pins
+
+    async def update_pin_summary(self):
+        # Try pintest -> pinout (-r) -> pinout -> gpio readall; show truncated output
+        def try_cmd(cmd:list[str]):
+            try:
+                return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
+            except Exception:
+                return None
+
+        output = await asyncio.to_thread(try_cmd, ["pintest"])
+        title = "pintest"
+        if not output:
+            output = await asyncio.to_thread(try_cmd, ["pinout", "-r"]) or await asyncio.to_thread(try_cmd, ["pinout"])
+            title = "pinout"
+        if not output:
+            output = await asyncio.to_thread(try_cmd, ["gpio", "readall"])
+            title = "gpio readall"
+
+        if output:
+            lines = [ln for ln in output.splitlines() if ln.strip()]
+            summary = "\n".join(lines[:18]) if lines else "No output"
+            try:
+                self.summary_widget.update(f"[cyan]{title} summary:[/cyan]\n{summary}")
+                self.status_text = f"Using {title} for pin info"
+            except Exception:
+                pass
+        else:
+            try:
+                self.summary_widget.update("[red]No pin summary available[/red]\nInstall 'pinout' (gpiozero) or 'gpio' (wiringpi) on Raspberry Pi.")
+                self.status_text = "No pin info source available"
+            except Exception:
+                pass
 
     def get_display_pin(self, bcm_pin: int) -> int:
         return self.BCM_TO_PHYS.get(bcm_pin, bcm_pin)
