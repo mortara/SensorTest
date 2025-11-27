@@ -124,11 +124,14 @@ class GPIOApp(App):
                 self.sensor_select.set_options(build_plugin_options(self.gpio_plugins))
         except Exception:
             pass
-        # Populate pin summary at startup
+        # Populate pin summary at startup (await to ensure it renders immediately)
         try:
-            asyncio.create_task(self.update_pin_summary())
-        except Exception:
-            pass
+            await self.update_pin_summary()
+        except Exception as e:
+            try:
+                self.summary_widget.update(f"[red]Pin summary failed: {e}[/red]")
+            except Exception:
+                pass
         if self.sensor_poll_task is None or self.sensor_poll_task.done():
             self.sensor_poll_task = asyncio.create_task(self.poll_sensors_periodically())
 
@@ -259,8 +262,8 @@ class GPIOApp(App):
         # Try pintest -> pinout (-r) -> pinout -> gpio readall; show truncated output
         def try_cmd(cmd:list[str]):
             try:
-                return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT)
-            except Exception:
+                return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
+            except Exception as e:
                 return None
 
         output = await asyncio.to_thread(try_cmd, ["pintest"])
@@ -282,7 +285,7 @@ class GPIOApp(App):
                 pass
         else:
             try:
-                self.summary_widget.update("[red]No pin summary available[/red]\nInstall 'pinout' (gpiozero) or 'gpio' (wiringpi) on Raspberry Pi.")
+                self.summary_widget.update("[red]No pin summary available[/red]\nInstall 'python3-gpiozero' for 'pinout' or 'wiringpi' for 'gpio readall'.")
                 self.status_text = "No pin info source available"
             except Exception:
                 pass
