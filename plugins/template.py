@@ -2,6 +2,7 @@ import asyncio
 
 class MySensorPlugin:
     name = "MySensor"
+    auto_detectable = False
 
     async def detect(self, pin: int, ctx):
         # Optional quick detection logic; return None if not detected

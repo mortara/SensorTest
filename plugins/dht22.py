@@ -9,6 +9,7 @@ except Exception:
 
 class DHT22Plugin:
     name = "DHT22"
+    auto_detectable = True
 
     async def detect(self, pin: int, ctx):
         if not HAS_ADAFRUIT:

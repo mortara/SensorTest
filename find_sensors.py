@@ -1,6 +1,6 @@
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, DataTable, Static, Button, Select
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 import RPi.GPIO as GPIO
 import asyncio
@@ -8,6 +8,16 @@ import re
 import subprocess
 from pathlib import Path
 import importlib.util
+import pkgutil
+import importlib
+import sys
+import os
+import logging
+
+# Scan tuning constants
+SCAN_PLUGIN_TIMEOUT = 0.5  # seconds per plugin detect
+SCAN_PIN_DELAY = 0.1       # delay between pins during GPIO scan
+I2C_SCAN_DELAY = 0.05      # delay between I2C addresses
 
 # SMBus for I2C
 try:
@@ -58,11 +68,24 @@ class PinTable(DataTable):
 # -------------------------------------------------------------------
 class GPIOApp(App):
     CSS = """
+    /* Layout root */
     Screen {layout: vertical;}
+
+    /* Top control bar */
     #buttons {border: round yellow; padding: 1; height: auto;}
     #buttons Button {border: round yellow; padding: 0 1; margin: 0 1;}
-    #table {border: round green; padding: 1;}
-    #details {border: round yellow; padding: 1; height: auto; min-height:3;}
+
+    /* Top info row: summary (left) + status+details (right) */
+    #topinfo {height: 10; min-height:3;}
+    #summary {border: round cyan; padding: 1; width: 1fr; height: 1fr; overflow: auto;}
+    #right {height: 1fr;}
+    #status {padding: 1; height: 3;}
+    #details {border: round yellow; padding: 1; width: 1fr; height: 1fr; min-height:3; overflow: auto;}
+
+    /* Main table */
+    #table {border: round green; padding: 1; height: 1fr;}
+
+    /* Sensor manual assignment select */
     #select {border: round yellow; padding: 1; height: auto;}
     """
     status_text: reactive[str] = reactive("")
@@ -94,13 +117,30 @@ class GPIOApp(App):
         self.BCM_TO_PHYS = {bcm: phys for phys, bcm in self.PHYS_TO_BCM.items()}
         # Plugin system for GPIO sensors
         self.gpio_plugins = {}
+        print("[startup] Lade Plugins...")
         self._load_gpio_plugins()
+        print(f"[startup] Plugins geladen: {', '.join(sorted(self.gpio_plugins.keys())) if self.gpio_plugins else 'keine'}")
         # Simple context to pass to plugins
         class _PluginCtx:
             def __init__(self, gpio, sem):
                 self.GPIO = gpio
                 self.gpio_sem = sem
         self.plugin_ctx = _PluginCtx(GPIO, self.gpio_sem)
+
+    # ----------------- Helpers -----------------
+    def _set_scan_marker(self, bcm_pin:int, text:str, color:str="yellow"):
+        try:
+            disp = self.get_display_pin(bcm_pin)
+            self.table.update_sensor(disp, text, "", color=color)
+        except Exception:
+            pass
+
+    def _set_sensor_result(self, bcm_pin:int, sensor_type:str, info:str, color:str):
+        try:
+            disp = self.get_display_pin(bcm_pin)
+            self.table.update_sensor(disp, sensor_type, info, color=color)
+        except Exception:
+            pass
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -109,12 +149,12 @@ class GPIOApp(App):
         self.btn_gpio = Button("Start GPIO Scan", id="btn_gpio")
         self.btn_i2c = Button("Start I2C Scan", id="btn_i2c")
         self.btn_stop_all = Button("Stop All Scans", id="btn_stop_all")
+        self.btn_scan_selected = Button("Scan Selected Pin", id="btn_scan_selected")
         self.btn_refresh = Button("Refresh Summary & Table", id="btn_refresh")
 
 
         # Sensor selection (combobox) — options from plugins + I2C
-        plugin_options = [(name, name) for name in sorted(self.gpio_plugins.keys())]
-        plugin_options.append(("I2C Device", "I2C"))
+        plugin_options = self._build_plugin_options()
         self.sensor_select = Select(
             options=plugin_options,
             allow_blank=True,
@@ -129,6 +169,7 @@ class GPIOApp(App):
             self.btn_stop_all,
             self.btn_refresh,
             self.sensor_select,
+            self.btn_scan_selected,
             id="buttons"
         )
 
@@ -143,21 +184,16 @@ class GPIOApp(App):
         except Exception:
             pass
 
-        # Summary above table
+        # Summary and details side-by-side above table
         self.summary_widget = Static("", id="summary")
-        yield self.summary_widget
+        self.status_widget = Static("", id="status")
+        self.detail_widget = Static("", id="details")
+        right_side = Vertical(self.status_widget, self.detail_widget, id="right")
+        yield Horizontal(self.summary_widget, right_side, id="topinfo")
         # Initial table population
         self.build_table_rows()
-        # Add table after summary
+        # Add table below topinfo
         yield self.table
-
-        # Detail pane for selected sensor
-        self.detail_widget = Static("", id="details")
-        yield self.detail_widget
-
-        # Status line
-        self.status_widget = Static("")
-        yield self.status_widget
 
         yield Footer()
 
@@ -169,6 +205,12 @@ class GPIOApp(App):
             pass
 
     async def on_mount(self):
+        # Ensure the selection reflects currently loaded plugins
+        try:
+            if hasattr(self, "sensor_select"):
+                self.sensor_select.set_options(self._build_plugin_options())
+        except Exception:
+            pass
         # Start periodic sensor polling
         if self.sensor_poll_task is None or self.sensor_poll_task.done():
             self.sensor_poll_task = asyncio.create_task(self.poll_sensors_periodically())
@@ -431,6 +473,21 @@ class GPIOApp(App):
                 self.i2c_task.cancel()
                 event.button.label="Start I2C Scan"
                 self.status_text="I2C scan stopped"
+        elif event.button.id=="btn_scan_selected":
+            # Scan only the currently selected row/pin in safe mode
+            row_key = self.last_row_key
+            if row_key is not None:
+                try:
+                    row = self.table.get_row(row_key)
+                    bcm_str = row[1] if len(row) > 1 else ""
+                    bcm_pin = int(bcm_str) if str(bcm_str).isdigit() else None
+                    if bcm_pin is not None and bcm_pin not in BUS_PINS:
+                        if self.gpio_task and not self.gpio_task.done():
+                            self.gpio_task.cancel()
+                        self.gpio_task = asyncio.create_task(self.scan_pin(bcm_pin))
+                        self.status_text = f"Safe scan selected BCM {bcm_pin}"
+                except Exception:
+                    pass
         elif event.button.id=="btn_stop_all":
             stopped=False
             if self.gpio_task and not self.gpio_task.done():
@@ -443,6 +500,14 @@ class GPIOApp(App):
                 stopped=True
             self.status_text="All scans stopped" if stopped else "No scans running"
         elif event.button.id=="btn_refresh":
+            # Reload plugins and refresh selection list
+            try:
+                self.gpio_plugins.clear()
+                self._load_gpio_plugins()
+                if hasattr(self, "sensor_select"):
+                    self.sensor_select.set_options(self._build_plugin_options())
+            except Exception:
+                pass
             await self.update_pintest_summary()
             self.build_table_rows()
             self.status_text = "Summary and table refreshed"
@@ -497,19 +562,27 @@ class GPIOApp(App):
 
         # Check known sensors via plugins
         for name, plugin in self.gpio_plugins.items():
+            if not getattr(plugin, "auto_detectable", False):
+                continue
             try:
                 self.detail_widget.update(f"Pin {pin}: Check {name}...")
-                res = await plugin.detect(pin, self.plugin_ctx)
+                # Show current plugin being checked in the table
+                self._set_scan_marker(pin, f"Scan {name}")
+                # Avoid hanging on single-pin scans as well
+                res = await asyncio.wait_for(plugin.detect(pin, self.plugin_ctx), timeout=SCAN_PLUGIN_TIMEOUT)
                 if res:
                     sensor_type, info, color = res
-                    disp = self.get_display_pin(pin)
-                    self.table.update_sensor(disp, sensor_type, info, color=color)
+                    self._set_sensor_result(pin, sensor_type, info, color)
                     self.detail_widget.update(f"Pin {pin}: {sensor_type} detected – {info}")
                     return
+            except asyncio.TimeoutError:
+                # Move on to next plugin on timeout
+                continue
             except Exception:
                 continue
 
         # Falls nichts erkannt wurde
+        self._set_scan_marker(pin, "-", color="red")
         self.detail_widget.update(f"Pin {pin}: No known sensor found")
 
     async def poll_sensors_periodically(self, interval: float = 10.0):
@@ -539,7 +612,7 @@ class GPIOApp(App):
                         pass
 
                 # Kurze Pause zwischen Pins, um CPU-Last zu senken
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(SCAN_PIN_DELAY)
 
                 # Tabelle sichtbar aktualisieren
                 try:
@@ -572,9 +645,42 @@ class GPIOApp(App):
             self.last_row_key = row_key
             await self._show_row_details(row_key)
 
+    # ----------------- Manual assignment via Select -----------------
+    def on_select_changed(self, event: Select.Changed):
+        try:
+            value = event.value
+            if not value:
+                return
+            # Need a selected row to assign
+            row_key = self.last_row_key
+            if row_key is None:
+                return
+            try:
+                row = self.table.get_row(row_key)
+            except Exception:
+                return
+            try:
+                phys_pin = int(row[0])
+            except Exception:
+                return
+            bcm_str = row[1] if len(row) > 1 else ""
+            try:
+                bcm_pin = int(bcm_str) if str(bcm_str).isdigit() else None
+            except Exception:
+                bcm_pin = None
+            if bcm_pin is None:
+                return
+            # Store manual assignment for periodic reads
+            self.fixed_pin_sensors[bcm_pin] = value
+            # Update table immediately
+            self.table.update_sensor(phys_pin, value, "manual", color="cyan")
+            self.status_text = f"Assigned {value} to pin BCM {bcm_pin}"
+        except Exception:
+            pass
+
     # ----------------- GPIO Scan -----------------
     async def scan_gpio(self):
-        self.status_text="GPIO scan started..."
+        self.status_text="GPIO scan (safe) gestartet"
         # Ensure BCM mode is set once before scanning
         try:
             if GPIO.getmode() is None:
@@ -592,23 +698,36 @@ class GPIOApp(App):
                 # Do not overwrite manually assigned pins
                 if pin in self.fixed_pin_sensors:
                     continue
-                self.status_text=f"Checking pin {pin}..."
-                await asyncio.sleep(0.05)
-                # Try all GPIO sensor plugins for auto-detection
+                found_any = False
+                await asyncio.sleep(SCAN_PIN_DELAY)
+                # Try only plugins that explicitly support safe auto-detection
                 for name, plugin in self.gpio_plugins.items():
+                    if not getattr(plugin, "auto_detectable", False):
+                        continue
                     try:
-                        res = await plugin.detect(pin, self.plugin_ctx)
+                        # Show current plugin being checked in the table Sensor column
+                        self._set_scan_marker(pin, f"Scan {name}")
+                        # Serialize hardware access during detection with a timeout to avoid hanging
+                        async with self.gpio_sem:
+                            res = await asyncio.wait_for(plugin.detect(pin, self.plugin_ctx), timeout=SCAN_PLUGIN_TIMEOUT)
                         if res:
                             sensor_type, info, color = res
-                            disp = self.get_display_pin(pin)
-                            self.table.update_sensor(disp, sensor_type, info, color=color)
+                            self._set_sensor_result(pin, sensor_type, info, color)
+                            found_any = True
                             break
+                    except asyncio.TimeoutError:
+                        # Mark timeout but continue to next plugin
+                        self._set_scan_marker(pin, f"Timeout {name}", color="red")
+                        continue
                     except Exception:
                         continue
+                # If no plugin matched, clear scan marker for this pin
+                if not found_any:
+                    self._set_scan_marker(pin, "-", color="red")
         except asyncio.CancelledError:
             return
         
-        self.status_text="GPIO scan completed"
+        self.status_text="GPIO scan (safe) beendet"
         self.btn_gpio.label="Start GPIO Scan"
         # Restart periodic polling after the scan
         if self.sensor_poll_task is None or self.sensor_poll_task.done():
@@ -617,14 +736,14 @@ class GPIOApp(App):
     # ----------------- I2C Scan -----------------
     async def scan_i2c(self):
         if not HAS_SMBUS:
-            self.status_text="I2C bus not available"
+            self.status_text="I2C-Bus nicht verfügbar"
             return
         try:
             bus=smbus.SMBus(1)
         except:
-            self.status_text="Error opening I2C"
+            self.status_text="Fehler beim Öffnen des I2C-Bus"
             return
-        self.status_text="I2C scan started..."
+        self.status_text="I2C-Scan gestartet"
         try:
             for addr in range(3,0x78):
                 def try_write():
@@ -634,45 +753,121 @@ class GPIOApp(App):
                 if found:
                     self.table.update_sensor(2,"I2C",f"Addr 0x{addr:02X}",color="yellow")
                 self.status_text=f"I2C scan: checking 0x{addr:02X}"
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(I2C_SCAN_DELAY)
         except asyncio.CancelledError:
             return
         
-        self.status_text="I2C scan completed"
+        self.status_text="I2C-Scan beendet"
         self.btn_i2c.label="Start I2C Scan"
 
     # ----------------- Plugin loading -----------------
     def _load_gpio_plugins(self):
         try:
-            plugins_dir = Path(__file__).parent / "plugins"
-            if not plugins_dir.exists():
-                return
-            for file in plugins_dir.iterdir():
-                if not file.is_file() or not file.name.endswith(".py"):
+            # 1) Candidate directories
+            base_dir = Path(__file__).parent
+            env_dir = os.environ.get("SENSOR_PLUGINS_DIR")
+            candidate_dirs = [base_dir / "plugins", base_dir / "Plugins"]
+            if env_dir:
+                candidate_dirs.insert(0, Path(env_dir))
+            print("[startup] Suche Plugins in:")
+            for d in candidate_dirs:
+                print(f"  - {d} {'(exists)' if d.exists() else '(missing)'}")
+
+            # 2) Iterate directories and import modules/packages
+            for plugins_dir in candidate_dirs:
+                if not plugins_dir.exists():
                     continue
-                if file.name in ("__init__.py", "base.py"):
-                    continue
-                spec = importlib.util.spec_from_file_location(f"plugins.{file.stem}", str(file))
-                if not spec or not spec.loader:
-                    continue
-                module = importlib.util.module_from_spec(spec)
-                try:
-                    spec.loader.exec_module(module)
-                except Exception:
-                    continue
-                # Each plugin module should expose get_plugin() -> instance with .name, async detect/read
-                get_plugin = getattr(module, "get_plugin", None)
-                if callable(get_plugin):
+                # Ensure import path contains plugins directory
+                if str(plugins_dir) not in sys.path:
+                    sys.path.insert(0, str(plugins_dir))
+
+                for m_info in pkgutil.iter_modules([str(plugins_dir)]):
+                    mod_name = m_info.name
+                    # Skip non-plugin infra modules
+                    if mod_name in {"__init__", "base"}:
+                        continue
+                    print(f"[startup] Lade Modul '{mod_name}'...")
+                    module = None
+                    try:
+                        module = importlib.import_module(mod_name)
+                    except Exception as e:
+                        print(f"[startup] Import fehlgeschlagen: {mod_name}: {e}")
+                        # Fallback: compile+exec with future annotations
+                        module = self._fallback_load_with_future_annotations(plugins_dir, mod_name)
+                    if module is None:
+                        continue
+
+                    # 3) Register plugin instances from module
+                    get_plugin = getattr(module, "get_plugin", None)
+                    if not callable(get_plugin):
+                        continue
                     try:
                         instance = get_plugin()
                         name = getattr(instance, "name", None)
-                        if name:
-                            self.gpio_plugins[name] = instance
+                        if not name:
+                            continue
+                        self.gpio_plugins[name] = instance
+                        print(f"[startup] Plugin registriert: {name}")
+                        print(f"[startup]  → Auto-Detection: {'aktiviert' if getattr(instance, 'auto_detectable', False) else 'deaktiviert'}")
                     except Exception:
                         continue
         except Exception:
             pass
 
+    def _fallback_load_with_future_annotations(self, plugins_dir: Path, mod_name: str):
+        """Best-effort Fallback: lädt ein Plugin-Modul als Datei oder Paket und
+        kompiliert mit aktivierten Future-Annotations, damit "X | None" unter Python < 3.10 funktioniert.
+        Gibt das geladene Modul zurück oder None bei Fehler.
+        """
+        try:
+            file = plugins_dir / f"{mod_name}.py"
+            pkg_init = plugins_dir / mod_name / "__init__.py"
+            src_path = None
+            is_pkg = False
+            if file.exists():
+                src_path = file
+            elif pkg_init.exists():
+                src_path = pkg_init
+                is_pkg = True
+            else:
+                print(f"[startup] Direktladen fehlgeschlagen: {mod_name}: Quelle nicht gefunden")
+                return None
+
+            import types, __future__
+            code_text = src_path.read_text(encoding="utf-8")
+            flags = __future__.annotations.compiler_flag
+            code_obj = compile(code_text, str(src_path), "exec", flags=flags, dont_inherit=True)
+            module = types.ModuleType(mod_name)
+            module.__file__ = str(src_path)
+            module.__package__ = mod_name if is_pkg else ""
+            if is_pkg:
+                module.__path__ = [str(src_path.parent)]  # type: ignore[attr-defined]
+            sys.modules[mod_name] = module
+            exec(code_obj, module.__dict__)
+            print(f"[startup] Fallback geladen mit Future-Annotations: {src_path.name}")
+            return module
+        except Exception as e2:
+            print(f"[startup] Direktladen fehlgeschlagen: {mod_name}: {e2}")
+            return None
+
+    def _build_plugin_options(self):
+        try:
+            opts = [(name, name) for name in sorted(self.gpio_plugins.keys())]
+        except Exception:
+            opts = []
+        # Always provide I2C manual assignment option
+        opts.append(("I2C Device", "I2C"))
+        return opts
+
 # -------------------------------------------------------------------
 if __name__=="__main__":
-        GPIOApp().run()
+        try:
+            logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+        except Exception:
+            pass
+        print("[startup] Starte SensorTest UI...")
+        if os.environ.get("SENSOR_PLUGINS_DIR"):
+            print(f"[startup] SENSOR_PLUGINS_DIR={os.environ.get('SENSOR_PLUGINS_DIR')}")
+        app = GPIOApp()
+        print(f"[startup] Insgesamt geladene Plugins: {len(app.gpio_plugins)}")
+        app.run()

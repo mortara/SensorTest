@@ -3,6 +3,7 @@ import asyncio
 
 class ButtonPlugin:
     name = "Button"
+    auto_detectable = False
 
     async def detect(self, pin: int, ctx):
         try:

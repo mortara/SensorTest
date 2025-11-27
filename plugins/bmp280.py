@@ -23,6 +23,7 @@ except Exception:
 
 class BMP280Plugin:
     name = "BMP280"
+    auto_detectable = True
 
     def _detect_address(self):
         if not HAS_SMBUS:

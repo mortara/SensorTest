@@ -4,6 +4,7 @@ from pathlib import Path
 
 class DS18B20Plugin:
     name = "DS18B20"
+    auto_detectable = True
 
     def _read_sysfs(self, device_path: Path):
         try:

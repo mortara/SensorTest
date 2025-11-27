@@ -3,7 +3,8 @@ import asyncio
 
 class LM393Plugin:
     name = "LM393"
-
+    auto_detectable = False
+    
     async def detect(self, pin: int, ctx):
         # Simple digital light sensor detection by stable level
         try:
