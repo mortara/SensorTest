@@ -278,14 +278,8 @@ class GPIOApp(App):
                 return None
 
         print("[pin-summary] Start collecting pin summary...")
-        output = await asyncio.to_thread(try_cmd, ["pintest"])
-        title = "pintest"
-        if not output:
-            output = await asyncio.to_thread(try_cmd, ["pinout", "-r"]) or await asyncio.to_thread(try_cmd, ["pinout"])
-            title = "pinout"
-        if not output:
-            output = await asyncio.to_thread(try_cmd, ["gpio", "readall"])
-            title = "gpio readall"
+        output = await asyncio.to_thread(try_cmd, ["pinout"])
+        title = "pinout"
 
         if output:
             lines = [ln for ln in output.splitlines() if ln.strip()]
@@ -474,4 +468,6 @@ def run_app():
         pass
     if os.environ.get("SENSOR_PLUGINS_DIR"):
         print(f"[startup] SENSOR_PLUGINS_DIR={os.environ.get('SENSOR_PLUGINS_DIR')}")
-    app = GPIOApp(); print(f"[startup] Total plugins loaded: {len(app.gpio_plugins)}"); app.run()
+    app = GPIOApp()
+    print(f"[startup] Total plugins loaded: {len(app.gpio_plugins)}")
+    app.run()
