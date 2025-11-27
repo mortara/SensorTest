@@ -268,10 +268,13 @@ class GPIOApp(App):
         # Try pintest -> pinout (-r) -> pinout -> gpio readall; show truncated output
         def try_cmd(cmd:list[str]):
             try:
-                print(f"[pin-summary] Running: {' '.join(cmd)}")
-                out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
+                print(f"[pin-summary] Running: {' '.join(cmd)} (timeout 3s)")
+                out = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+                if out.returncode != 0:
+                    raise RuntimeError(out.stderr.strip() or f"exit {out.returncode}")
+                text = (out.stdout or "").strip()
                 print(f"[pin-summary] Success: {' '.join(cmd)}; first lines:\n" + "\n".join(out.splitlines()[:6]))
-                return out
+                return text
             except Exception as e:
                 print(f"[pin-summary] Failed: {' '.join(cmd)} -> {e}")
                 return None
