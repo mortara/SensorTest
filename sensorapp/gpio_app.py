@@ -268,10 +268,15 @@ class GPIOApp(App):
         # Try pintest -> pinout (-r) -> pinout -> gpio readall; show truncated output
         def try_cmd(cmd:list[str]):
             try:
-                return subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
+                print(f"[pin-summary] Running: {' '.join(cmd)}")
+                out = subprocess.check_output(cmd, text=True, stderr=subprocess.STDOUT).strip()
+                print(f"[pin-summary] Success: {' '.join(cmd)}; first lines:\n" + "\n".join(out.splitlines()[:6]))
+                return out
             except Exception as e:
+                print(f"[pin-summary] Failed: {' '.join(cmd)} -> {e}")
                 return None
 
+        print("[pin-summary] Start collecting pin summary...")
         output = await asyncio.to_thread(try_cmd, ["pintest"])
         title = "pintest"
         if not output:
@@ -287,12 +292,14 @@ class GPIOApp(App):
             try:
                 self.summary_widget.update(f"[cyan]{title} summary:[/cyan]\n{summary}")
                 self.status_text = f"Using {title} for pin info"
+                print(f"[pin-summary] Displaying {title} summary (truncated to 18 lines).")
             except Exception:
                 pass
         else:
             try:
                 self.summary_widget.update("[red]No pin summary available[/red]\nInstall 'python3-gpiozero' for 'pinout' or 'wiringpi' for 'gpio readall'.")
                 self.status_text = "No pin info source available"
+                print("[pin-summary] No pin summary source available. Suggest installing gpiozero/wiringpi.")
             except Exception:
                 pass
 
