@@ -94,9 +94,10 @@ class GPIOApp(App):
         self.btn_i2c = Button("Scan I2C", id="btn_i2c")
         self.btn_stop_all = Button("Stop All", id="btn_stop_all")
         self.btn_scan_selected = Button("Scan Pin", id="btn_scan_selected")
+        self.btn_refresh_summary = Button("Refresh Summary", id="btn_refresh_summary")
         plugin_options = build_plugin_options(self.gpio_plugins)
         self.sensor_select = Select(options=plugin_options, allow_blank=True, prompt="Assign sensor", id="sensor_select")
-        yield Horizontal(self.btn_gpio, self.btn_i2c, self.btn_stop_all, self.sensor_select, self.btn_scan_selected, id="buttons")
+        yield Horizontal(self.btn_gpio, self.btn_i2c, self.btn_stop_all, self.sensor_select, self.btn_scan_selected, self.btn_refresh_summary, id="buttons")
         self.table = PinTable(); self.table.id = "table"
         try:
             self.table.cursor_type = "row"; self.table.show_cursor = True
@@ -130,14 +131,11 @@ class GPIOApp(App):
         except Exception:
             pass
         # Populate pin summary at startup in background to avoid blocking the UI
+        # Defer summary load until user requests (avoid startup hangs)
         try:
-            asyncio.create_task(self.update_pin_summary())
+            self.summary_widget.update("[yellow]Summary idle. Press 'Refresh Summary'.[/yellow]")
         except Exception:
-            # Fallback minimal message
-            try:
-                self.summary_widget.update("[yellow]Loading pin summary...[/yellow]")
-            except Exception:
-                pass
+            pass
         if self.sensor_poll_task is None or self.sensor_poll_task.done():
             self.sensor_poll_task = asyncio.create_task(self.poll_sensors_periodically())
 
@@ -334,6 +332,15 @@ class GPIOApp(App):
             if self.gpio_task and not self.gpio_task.done(): self.gpio_task.cancel(); self.btn_gpio.label="Scan GPIO"; stopped=True
             if self.i2c_task and not self.i2c_task.done(): self.i2c_task.cancel(); self.btn_i2c.label="Scan I2C"; stopped=True
             self.status_text="All scans stopped" if stopped else "No scans running"
+        elif event.button.id=="btn_refresh_summary":
+            try:
+                self.summary_widget.update("[yellow]Loading pin summary...[/yellow]")
+            except Exception:
+                pass
+            try:
+                asyncio.create_task(self.update_pin_summary())
+            except Exception:
+                self.status_text = "Failed to start pin summary task"
 
     async def _show_row_details(self, row_key):
         try: row = self.table.get_row(row_key)
