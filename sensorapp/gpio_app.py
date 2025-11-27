@@ -124,12 +124,13 @@ class GPIOApp(App):
                 self.sensor_select.set_options(build_plugin_options(self.gpio_plugins))
         except Exception:
             pass
-        # Populate pin summary at startup (await to ensure it renders immediately)
+        # Populate pin summary at startup in background to avoid blocking the UI
         try:
-            await self.update_pin_summary()
-        except Exception as e:
+            asyncio.create_task(self.update_pin_summary())
+        except Exception:
+            # Fallback minimal message
             try:
-                self.summary_widget.update(f"[red]Pin summary failed: {e}[/red]")
+                self.summary_widget.update("[yellow]Loading pin summary...[/yellow]")
             except Exception:
                 pass
         if self.sensor_poll_task is None or self.sensor_poll_task.done():
