@@ -3,6 +3,8 @@ import asyncio
 
 class PIRHCSR501Plugin:
     name = "PIR HC-SR501"
+    bus_type = "GPIO"
+    pin_roles: list[str] = ["DATA"]
 
     async def detect(self, pin: int, ctx):
         try:
@@ -30,8 +32,20 @@ class PIRHCSR501Plugin:
         except Exception:
             return None
 
+    async def read_with_roles(self, roles: dict[str, int], ctx):
+        data_pin = roles.get("DATA")
+        if data_pin is None:
+            return None
+        return await self.read(data_pin, ctx)
+
     async def details(self, phys_pin: int, bcm_pin: int | None, ctx) -> str:
         header = f"Pin {phys_pin}"
+        try:
+            assigned = getattr(ctx, "role_pin_assignments", {}).get((self.name, "DATA"))
+            if assigned is not None:
+                bcm_pin = assigned
+        except Exception:
+            pass
         try:
             if bcm_pin is not None:
                 res = await self.read(bcm_pin, ctx)

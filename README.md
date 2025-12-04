@@ -18,6 +18,31 @@ Python packages (TUI and sensors):
 python3 -m pip install --upgrade pip
 python3 -m pip install textual Adafruit_DHT gpiozero
 ```
+## Quick Setup
+- Windows (PowerShell):
+```powershell
+cd d:\PMortara\Dokumente\VSCodeProjects\SensorTest\scripts
+./install.ps1
+```
+
+- Raspberry Pi (Bash):
+```bash
+cd SensorTest/scripts
+chmod +x install.sh
+./install.sh
+```
+
+After installation, activate the virtual environment and run:
+```powershell
+.\.venv\Scripts\Activate.ps1; python find_sensors.py
+```
+or on Raspberry Pi:
+```bash
+source .venv/bin/activate
+python find_sensors.py
+```
+
+All dependencies are listed in `requirements.txt`. GPIO-related packages only work on Raspberry Pi.
 
 Notes:
 - `RPi.GPIO` typically comes via APT (`python3-rpi.gpio`).
@@ -97,15 +122,17 @@ plugins/               # Individual sensor plugins (get_plugin factory per file)
 ## Plugin System (GPIO Sensors)
 GPIO sensors are loaded dynamically from the `plugins/` folder. Each plugin is a Python file exposing:
 - `name: str` — short display name
+- `bus_type: str` — optional; classify device bus (e.g., `GPIO`, `I2C`, `SPI`)
+- `pin_roles: list[str]` — optional; define role names for multi-pin devices (e.g., `["CLK","DIO"]`)
 - `async def detect(pin: int, ctx) -> Optional[(sensor_type, info, color)]` — try to detect sensor on a pin
 - `async def read(pin: int, ctx) -> Optional[(sensor_type, info, color)]` — get a reading/state
- - `async def details(phys_pin: int, bcm_pin: int | None, ctx) -> str` — render the details pane content
+- `async def details(phys_pin: int, bcm_pin: int | None, ctx) -> str` — render the details pane content
 and a factory function:
 ```python
 def get_plugin():
 	return MySensorPlugin()
 ```
-Where `ctx` provides `ctx.GPIO` (RPi.GPIO) and `ctx.gpio_sem` (asyncio.Semaphore) to serialize GPIO access.
+Where `ctx` provides `ctx.GPIO` (RPi.GPIO), `ctx.gpio_sem` (asyncio.Semaphore) to serialize GPIO access, and `ctx.role_pin_assignments` mapping `(sensor_name, role) -> bcm_pin` for multi-pin plugins.
 
 Example skeleton (`plugins/template.py`):
 ```python
@@ -113,6 +140,8 @@ import asyncio
 
 class MySensorPlugin:
 	name = "MySensor"
+	bus_type = "GPIO"
+	pin_roles = ["DATA"]
 
 	async def detect(self, pin: int, ctx):
 		# Optional quick detection logic; return None if not detected
@@ -126,6 +155,10 @@ class MySensorPlugin:
 
 	async def details(self, phys_pin: int, bcm_pin: int | None, ctx) -> str:
 		header = f"Pin {phys_pin}"
+		# Use assigned DATA role if present
+		assigned = getattr(ctx, "role_pin_assignments", {}).get((self.name, "DATA"))
+		if assigned is not None:
+			bcm_pin = assigned
 		try:
 			if bcm_pin is not None:
 				res = await self.read(bcm_pin, ctx)
@@ -149,4 +182,20 @@ class MySensorPlugin:
 def get_plugin():
 	return MySensorPlugin()
 ```
+
+### Assigning Multi-Pin Roles
+- The sensor select box lists role-specific options when a plugin provides `pin_roles` (e.g., `TM1637:CLK`, `TM1637:DIO`).
+- Assign each role to the appropriate BCM pin; plugins can then read these assignments from `ctx.role_pin_assignments`.
+- For I2C devices (e.g., BMP280), `bus_type = "I2C"` and `pin_roles = ["SDA","SCL"]` are provided for consistency; detection uses the I2C bus, not per-pin scanning.
+
+### Plugin Roles
+| Plugin | `bus_type` | `pin_roles` | Auto-detect |
+| - | - | - | - |
+| DHT22 | GPIO | [DATA] | yes |
+| LM393 | GPIO | [DATA] | no |
+| DS18B20 | GPIO | [DATA] | yes |
+| PIR HC-SR501 | GPIO | [DATA] | no |
+| Button | GPIO | [DATA] | no |
+| BMP280 | I2C | [SDA, SCL] | yes |
+| TM1637 | GPIO | [CLK, DIO] | no |
 

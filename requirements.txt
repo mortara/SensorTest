@@ -1,0 +1,9 @@
+textual>=0.58
+gpiozero>=1.6
+RPi.GPIO>=0.7
+Adafruit_DHT>=1.4.0
+smbus2>=0.4.3
+adafruit-circuitpython-bmp280>=3.3.0
+# Optional: legacy bmp280 driver
+bmp280>=0.0.4
+tm1637>=1.2.5

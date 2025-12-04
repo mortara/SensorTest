@@ -52,6 +52,8 @@ class GPIOApp(App):
         self.gpio_task = None
         self.i2c_task = None
         self.fixed_pin_sensors = {}
+        # New: track role-specific assignments: (sensor, role) -> bcm pin
+        self.role_pin_assignments = {}
         self.last_row_key = None
         self.sensor_poll_task = None
         self.gpio_sem = asyncio.Semaphore(1)
@@ -68,10 +70,12 @@ class GPIOApp(App):
         self.gpio_plugins = load_gpio_plugins()
         print(f"[startup] Plugins loaded: {', '.join(sorted(self.gpio_plugins.keys())) if self.gpio_plugins else 'none'}")
         class _PluginCtx:
-            def __init__(self, gpio, sem):
+            def __init__(self, gpio, sem, role_map_ref):
                 self.GPIO = gpio
                 self.gpio_sem = sem
-        self.plugin_ctx = _PluginCtx(GPIO, self.gpio_sem)
+                # Reference to role-specific assignments: {(sensor, role): bcm}
+                self.role_pin_assignments = role_map_ref
+        self.plugin_ctx = _PluginCtx(GPIO, self.gpio_sem, self.role_pin_assignments)
 
     # Helpers
     def _set_scan_marker(self, bcm_pin:int, text:str, color:str="yellow"):
@@ -382,6 +386,31 @@ class GPIOApp(App):
                 if GPIO.getmode() is None: GPIO.setmode(GPIO.BCM)
             except Exception: pass
             while True:
+                # 1) Role-based plugins: if all required roles are assigned, call read_with_roles once
+                try:
+                    by_sensor_roles = {}
+                    for (sname, role), bcm in list(self.role_pin_assignments.items()):
+                        by_sensor_roles.setdefault(sname, {})[role] = bcm
+                    for sname, roles_map in by_sensor_roles.items():
+                        plugin = self.gpio_plugins.get(sname)
+                        if not plugin:
+                            continue
+                        required = getattr(plugin, "pin_roles", []) or []
+                        if required and all(r in roles_map for r in required) and hasattr(plugin, "read_with_roles"):
+                            try:
+                                res = await plugin.read_with_roles(roles_map, self.plugin_ctx)  # type: ignore[attr-defined]
+                                if res:
+                                    sensor_type, info, color = res
+                                    # Update all assigned role pins with the same info
+                                    for bcm_pin in roles_map.values():
+                                        disp = self.get_display_pin(bcm_pin)
+                                        self.table.update_sensor(disp, sensor_type, info, color=color)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+                # 2) Single-pin assignments remain supported
                 for pin, sensor in list(self.fixed_pin_sensors.items()):
                     try:
                         plugin = self.gpio_plugins.get(sensor)
@@ -391,7 +420,8 @@ class GPIOApp(App):
                                 sensor_type, info, color = res; disp = self.get_display_pin(pin); self.table.update_sensor(disp, sensor_type, info, color=color)
                         elif sensor == "I2C":
                             self.table.update_sensor(pin, "I2C", "active", color="yellow")
-                    except Exception: pass
+                    except Exception:
+                        pass
                 await asyncio.sleep(SCAN_PIN_DELAY)
                 try: self.table.refresh()
                 except Exception: pass
@@ -423,7 +453,20 @@ class GPIOApp(App):
             except Exception: return
             bcm_str = row[1] if len(row) > 1 else ""; bcm_pin = int(bcm_str) if str(bcm_str).isdigit() else None
             if bcm_pin is None: return
-            self.fixed_pin_sensors[bcm_pin] = value; self.table.update_sensor(phys_pin, value, "manual", color="cyan"); self.status_text = f"Assigned {value} to pin BCM {bcm_pin}"
+            # Parse role-specific selection "Sensor:Role"
+            sensor_name = value
+            role = None
+            if ":" in value:
+                parts = value.split(":", 1)
+                sensor_name, role = parts[0], parts[1]
+            # Save per-pin assignment (for display) and role mapping (for multi-pin plugins)
+            self.fixed_pin_sensors[bcm_pin] = sensor_name
+            if role:
+                self.role_pin_assignments[(sensor_name, role)] = bcm_pin
+                display_val = f"{sensor_name}({role})"
+            else:
+                display_val = sensor_name
+            self.table.update_sensor(phys_pin, display_val, "manual", color="cyan"); self.status_text = f"Assigned {display_val} to pin BCM {bcm_pin}"
         except Exception: pass
 
     async def scan_gpio(self):

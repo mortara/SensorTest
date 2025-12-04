@@ -9,6 +9,8 @@ except Exception:
 
 class DHT22Plugin:
     name = "DHT22"
+    bus_type = "GPIO"
+    pin_roles: list[str] = ["DATA"]
     auto_detectable = True
 
     async def detect(self, pin: int, ctx):
@@ -42,8 +44,22 @@ class DHT22Plugin:
             return None
         return None
 
+    async def read_with_roles(self, roles: dict[str, int], ctx):
+        data_pin = roles.get("DATA")
+        if data_pin is None:
+            return None
+        return await self.read(data_pin, ctx)
+
     async def details(self, phys_pin: int, bcm_pin: int | None, ctx) -> str:
         header = f"Pin {phys_pin}"
+        # Prefer assigned DATA role from context
+        try:
+            role_map = getattr(ctx, "role_pin_assignments", {})
+            assigned = role_map.get((self.name, "DATA"))
+            if assigned is not None:
+                bcm_pin = assigned
+        except Exception:
+            pass
         try:
             if bcm_pin is not None:
                 res = await self.read(bcm_pin, ctx)

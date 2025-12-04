@@ -23,6 +23,8 @@ except Exception:
 
 class BMP280Plugin:
     name = "BMP280"
+    bus_type = "I2C"
+    pin_roles: list[str] = ["SDA", "SCL"]
     auto_detectable = True
 
     def _detect_address(self):
@@ -83,6 +85,10 @@ class BMP280Plugin:
         except Exception:
             return (self.name, f"Addr 0x{addr:02X}", "yellow")
         return (self.name, f"Addr 0x{addr:02X}", "yellow")
+
+    async def read_with_roles(self, roles: dict[str, int], ctx):
+        # I2C device: roles are not needed for reading; reuse existing logic
+        return await self.read(0, ctx)
 
     async def details(self, phys_pin: int, bcm_pin: int | None, ctx) -> str:
         header = f"Pin {phys_pin}"

@@ -96,9 +96,23 @@ def load_gpio_plugins(base_ref: Path | None = None) -> Dict[str, Any]:
 
 
 def build_plugin_options(plugins: Dict[str, Any]):
+    """Build selection options including role-specific entries for multi-pin plugins.
+
+    Example: TM1637 with pin_roles=["CLK","DIO"] becomes options
+    ("TM1637:CLK","TM1637:CLK") and ("TM1637:DIO","TM1637:DIO").
+    """
+    opts = []
     try:
-        opts = [(name, name) for name in sorted(plugins.keys())]
+        for name in sorted(plugins.keys()):
+            plugin = plugins.get(name)
+            roles = getattr(plugin, "pin_roles", None)
+            if isinstance(roles, (list, tuple)) and roles:
+                for role in roles:
+                    label = f"{name}:{role}"
+                    opts.append((label, label))
+            else:
+                opts.append((name, name))
     except Exception:
-        opts = []
+        pass
     opts.append(("I2C Device", "I2C"))
     return opts

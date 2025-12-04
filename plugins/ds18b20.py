@@ -5,6 +5,8 @@ from pathlib import Path
 class DS18B20Plugin:
     name = "DS18B20"
     auto_detectable = True
+    bus_type = "GPIO"
+    pin_roles: list[str] = ["DATA"]
 
     def _read_sysfs(self, device_path: Path):
         try:
@@ -54,8 +56,19 @@ class DS18B20Plugin:
             return (self.name, f"{temp:.1f}°C", "green")
         return None
 
+    async def read_with_roles(self, roles: dict[str, int], ctx):
+        # DS18B20 read is independent from the passed pin, but prefer assigned DATA role for clarity
+        return await self.read(roles.get("DATA", 4), ctx)
+
     async def details(self, phys_pin: int, bcm_pin: int | None, ctx) -> str:
         header = f"Pin {phys_pin}"
+        # Prefer assigned DATA role
+        try:
+            assigned = getattr(ctx, "role_pin_assignments", {}).get((self.name, "DATA"))
+            if assigned is not None:
+                bcm_pin = assigned
+        except Exception:
+            pass
         try:
             res = await self.read(bcm_pin or 4, ctx)  # DS18B20 commonly on BCM4
             if res:
